@@ -11,7 +11,7 @@ const rl = readline.createInterface({
 
 // Pengaturan dasar
 const settings = {
-  BASE_URL: 'https://klokapp.ai/app.txt?c=073c529d-8078-4ca7-a635-b65836497983&_rsc=1m4kk', // Ganti dengan URL API target
+  BASE_URL: 'https://www.googletagmanager.com/gtag/js?id=G-D249C5RHMK', // Ganti dengan URL API target
   SESSION_TOKEN: '', // Session token untuk autentikasi
   USE_PROXY: false, // Gunakan proxy atau tidak
   PROXY_LIST: [], // Daftar proxy dari file
