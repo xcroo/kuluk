@@ -1,7 +1,7 @@
 const axios = require('axios'); // Untuk permintaan HTTP
 const { HttpsProxyAgent } = require('http-proxy-agent'); // Untuk proxy HTTP
 const readline = require('readline'); // Untuk input pengguna
-const fs = require('fs'); // Untuk membaca file
+const fs = require('fs'); // Untuk membaca/menulis file
 
 // Membuat interface untuk readline
 const rl = readline.createInterface({
@@ -11,16 +11,18 @@ const rl = readline.createInterface({
 
 // Pengaturan dasar
 const settings = {
-  BASE_URL: 'https://example.com/api', // Ganti dengan URL API target
+  BASE_URL: 'https://klokapp.ai/app.txt?c=073c529d-8078-4ca7-a635-b65836497983&_rsc=1m4kk', // Ganti dengan URL API target
   SESSION_TOKEN: '', // Session token untuk autentikasi
   USE_PROXY: false, // Gunakan proxy atau tidak
   PROXY_LIST: [], // Daftar proxy dari file
-  DELAY_BETWEEN_REQUESTS: [1000, 3000], // Penundaan antar permintaan (dalam milidetik)
+  DELAY_BETWEEN_REQUESTS: [5000, 9000], // Penundaan antar permintaan (dalam milidetik)
   TASKS: ['task1', 'task2'], // Daftar tugas
   QUESTIONS_FILE: 'questions.txt', // File tempat pertanyaan disimpan
+  CHAT_LIMIT: 50, // Batas chat per hari
+  STATE_FILE: 'bot_state.json', // File untuk menyimpan status bot
 };
 
-// Fungsi untuk membaca pertanyaan dari file
+// Memuat pertanyaan dari file
 function loadQuestions() {
   if (fs.existsSync(settings.QUESTIONS_FILE)) {
     return fs.readFileSync(settings.QUESTIONS_FILE, 'utf8').split('\n').filter(Boolean);
@@ -32,7 +34,20 @@ function loadQuestions() {
   }
 }
 
-const QUESTIONS = loadQuestions(); // Memuat pertanyaan dari file
+const QUESTIONS = loadQuestions();
+
+// Memuat status bot dari file
+function loadState() {
+  if (fs.existsSync(settings.STATE_FILE)) {
+    return JSON.parse(fs.readFileSync(settings.STATE_FILE, 'utf8'));
+  }
+  return { chatCount: 0, lastReset: Date.now() };
+}
+
+// Menyimpan status bot ke file
+function saveState(state) {
+  fs.writeFileSync(settings.STATE_FILE, JSON.stringify(state));
+}
 
 // Fungsi untuk menunda eksekusi
 function sleep(ms) {
@@ -56,26 +71,6 @@ function getRandomProxy() {
   return new HttpsProxyAgent(`http://${proxy}`);
 }
 
-// Fungsi untuk menyelesaikan tugas
-async function completeTask(taskId) {
-  const proxyAgent = getRandomProxy();
-  try {
-    const response = await axios.post(
-      `${settings.BASE_URL}/tasks/${taskId}`,
-      { status: 'completed' }, // Sesuaikan payload dengan API
-      {
-        headers: { 'x-session-token': settings.SESSION_TOKEN }, // Gunakan session token
-        httpsAgent: proxyAgent // Gunakan proxy jika aktif
-      }
-    );
-    console.log(`Tugas ${taskId} selesai:`, response.data);
-    return true;
-  } catch (error) {
-    console.error(`Gagal menyelesaikan tugas ${taskId}:`, error.message);
-    return false;
-  }
-}
-
 // Fungsi untuk mengirim pesan
 async function sendMessage() {
   const message = getRandomQuestion();
@@ -97,29 +92,52 @@ async function sendMessage() {
   }
 }
 
+// Fungsi untuk mengecek dan menunggu jeda 24 jam
+async function waitForNextCycle(state) {
+  const now = Date.now();
+  const oneDayInMs = 24 * 60 * 60 * 1000; // 24 jam dalam milidetik
+  const timeSinceLastReset = now - state.lastReset;
+
+  if (timeSinceLastReset < oneDayInMs) {
+    const timeToWait = oneDayInMs - timeSinceLastReset;
+    console.log(`Menunggu ${Math.round(timeToWait / (1000 * 60 * 60))} jam sebelum siklus berikutnya...`);
+    await sleep(timeToWait);
+  }
+
+  // Reset state setelah 24 jam
+  state.chatCount = 0;
+  state.lastReset = Date.now();
+  saveState(state);
+}
+
 // Fungsi utama untuk menjalankan bot
 async function runBot() {
   console.log('Memulai bot...');
   console.log(`Loaded ${QUESTIONS.length} questions from ${settings.QUESTIONS_FILE}`);
 
-  // Menyelesaikan semua tugas
-  for (const task of settings.TASKS) {
-    await completeTask(task);
-    const delay = getRandomNumber(settings.DELAY_BETWEEN_REQUESTS[0], settings.DELAY_BETWEEN_REQUESTS[1]);
-    console.log(`Menunggu ${delay / 1000} detik sebelum tugas berikutnya...`);
-    await sleep(delay);
-  }
+  let state = loadState();
 
-  // Mengirim 5 pesan sebagai contoh (bisa disesuaikan)
-  for (let i = 0; i < 5; i++) {
-    await sendMessage();
-    const delay = getRandomNumber(settings.DELAY_BETWEEN_REQUESTS[0], settings.DELAY_BETWEEN_REQUESTS[1]);
-    console.log(`Menunggu ${delay / 1000} detik sebelum pesan berikutnya...`);
-    await sleep(delay);
-  }
+  while (true) { // Loop tanpa henti
+    // Cek apakah sudah 24 jam sejak reset terakhir
+    if (state.chatCount >= settings.CHAT_LIMIT) {
+      await waitForNextCycle(state);
+      state = loadState(); // Muat ulang state setelah reset
+    }
 
-  console.log('Bot selesai berjalan.');
-  rl.close();
+    // Kirim pesan hingga mencapai batas 50
+    while (state.chatCount < settings.CHAT_LIMIT) {
+      const success = await sendMessage();
+      if (success) {
+        state.chatCount++;
+        saveState(state);
+      }
+      const delay = getRandomNumber(settings.DELAY_BETWEEN_REQUESTS[0], settings.DELAY_BETWEEN_REQUESTS[1]);
+      console.log(`Menunggu ${delay / 1000} detik sebelum pesan berikutnya...`);
+      await sleep(delay);
+    }
+
+    console.log(`Selesai mengirim ${settings.CHAT_LIMIT} pesan hari ini.`);
+  }
 }
 
 // Fungsi untuk mengatur konfigurasi
