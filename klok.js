@@ -1,7 +1,7 @@
 const axios = require('axios'); // Untuk permintaan HTTP
-const { HttpsProxyAgent } = require('http-proxy-agent'); // Untuk proxy HTTP
 const readline = require('readline'); // Untuk input pengguna
 const fs = require('fs'); // Untuk membaca/menulis file
+const https = require('https'); // Untuk konfigurasi HTTPS
 
 // Membuat interface untuk readline
 const rl = readline.createInterface({
@@ -11,15 +11,16 @@ const rl = readline.createInterface({
 
 // Pengaturan dasar
 const settings = {
-  BASE_URL: 'https://www.googletagmanager.com/gtag/js?id=G-D249C5RHMK', // Ganti dengan URL API target
+  BASE_URL: 'https://api1-pp.klokapp.ai/v1', // URL API yang benar
   SESSION_TOKEN: '', // Session token untuk autentikasi
   USE_PROXY: false, // Gunakan proxy atau tidak
   PROXY_LIST: [], // Daftar proxy dari file
   DELAY_BETWEEN_REQUESTS: [5000, 9000], // Penundaan antar permintaan (dalam milidetik)
-  TASKS: ['task1', 'task2'], // Daftar tugas
   QUESTIONS_FILE: 'questions.txt', // File tempat pertanyaan disimpan
   CHAT_LIMIT: 50, // Batas chat per hari
   STATE_FILE: 'bot_state.json', // File untuk menyimpan status bot
+  CHAT_ID: '', // Chat ID akan diminta dari pengguna
+  MODEL: 'llama-3.3-70b-instruct' // Model yang digunakan
 };
 
 // Memuat pertanyaan dari file
@@ -68,26 +69,70 @@ function getRandomQuestion() {
 function getRandomProxy() {
   if (!settings.USE_PROXY || settings.PROXY_LIST.length === 0) return null;
   const proxy = settings.PROXY_LIST[Math.floor(Math.random() * settings.PROXY_LIST.length)];
-  return new HttpsProxyAgent(`http://${proxy}`);
+  const match = proxy.match(/http:\/\/([^:]+):([^@]+)@([^:]+):(\d+)/);
+  if (!match) {
+    console.error(`Format proxy salah: ${proxy}`);
+    return null;
+  }
+  const [, username, password, host, port] = match;
+  return {
+    host: host,
+    port: parseInt(port),
+    auth: {
+      username: username,
+      password: password
+    }
+  };
 }
 
 // Fungsi untuk mengirim pesan
 async function sendMessage() {
   const message = getRandomQuestion();
-  const proxyAgent = getRandomProxy();
+  const proxyConfig = getRandomProxy();
   try {
+    const config = {
+      headers: {
+        'x-session-token': settings.SESSION_TOKEN,
+        'Content-Type': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept': 'application/json',
+        'Origin': 'https://klokapp.ai',
+        'Referer': 'https://klokapp.ai/app'
+      },
+      httpsAgent: new https.Agent({
+        rejectUnauthorized: false,
+        keepAlive: true
+      }),
+      timeout: 30000
+    };
+    if (proxyConfig) {
+      config.proxy = proxyConfig;
+    }
+    const payload = {
+      messages: [
+        {
+          role: "user",
+          content: message
+        }
+      ],
+      chat_id: settings.CHAT_ID,
+      model: settings.MODEL
+    };
     const response = await axios.post(
       `${settings.BASE_URL}/chat`,
-      { message: message }, // Kirim pertanyaan acak
-      {
-        headers: { 'x-session-token': settings.SESSION_TOKEN }, // Gunakan session token
-        httpsAgent: proxyAgent // Gunakan proxy jika aktif
-      }
+      payload,
+      config
     );
     console.log(`Pesan terkirim: "${message}"`, response.data);
     return true;
   } catch (error) {
-    console.error(`Gagal mengirim pesan:`, error.message);
+    console.error(`Gagal mengirim pesan:`, error.response ? error.response.data : error.message);
+    if (error.response && error.response.data.detail) {
+      error.response.data.detail.forEach(detail => {
+        console.error(`Field yang hilang:`, detail.loc);
+      });
+    }
+    if (error.code) console.error(`Kode kesalahan: ${error.code}`);
     return false;
   }
 }
@@ -95,7 +140,7 @@ async function sendMessage() {
 // Fungsi untuk mengecek dan menunggu jeda 24 jam
 async function waitForNextCycle(state) {
   const now = Date.now();
-  const oneDayInMs = 24 * 60 * 60 * 1000; // 24 jam dalam milidetik
+  const oneDayInMs = 24 * 60 * 60 * 1000;
   const timeSinceLastReset = now - state.lastReset;
 
   if (timeSinceLastReset < oneDayInMs) {
@@ -104,7 +149,6 @@ async function waitForNextCycle(state) {
     await sleep(timeToWait);
   }
 
-  // Reset state setelah 24 jam
   state.chatCount = 0;
   state.lastReset = Date.now();
   saveState(state);
@@ -117,14 +161,12 @@ async function runBot() {
 
   let state = loadState();
 
-  while (true) { // Loop tanpa henti
-    // Cek apakah sudah 24 jam sejak reset terakhir
+  while (true) {
     if (state.chatCount >= settings.CHAT_LIMIT) {
       await waitForNextCycle(state);
-      state = loadState(); // Muat ulang state setelah reset
+      state = loadState();
     }
 
-    // Kirim pesan hingga mencapai batas 50
     while (state.chatCount < settings.CHAT_LIMIT) {
       const success = await sendMessage();
       if (success) {
@@ -144,6 +186,7 @@ async function runBot() {
 async function configureSettings() {
   settings.BASE_URL = await new Promise(resolve => rl.question('Masukkan URL API: ', resolve));
   settings.SESSION_TOKEN = await new Promise(resolve => rl.question('Masukkan Session Token: ', resolve));
+  settings.CHAT_ID = await new Promise(resolve => rl.question('Masukkan Chat ID: ', resolve));
   
   const useProxy = await new Promise(resolve => rl.question('Gunakan proxy? (y/n): ', resolve));
   settings.USE_PROXY = useProxy.toLowerCase() === 'y';
