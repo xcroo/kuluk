@@ -1,0 +1,5 @@
+{
+  "BASE_URL": "https://api1-pp.klokapp.ai/v1",
+  "SESSION_TOKEN": "YOUR-SESSION",
+  "CHAT_ID": "YOURCHAT_ID"
+}
