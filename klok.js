@@ -2,6 +2,8 @@ const axios = require('axios'); // Untuk permintaan HTTP
 const readline = require('readline'); // Untuk input pengguna
 const fs = require('fs'); // Untuk membaca/menulis file
 const https = require('https'); // Untuk konfigurasi HTTPS
+const { SocksProxyAgent } = require('socks-proxy-agent'); // Untuk proxy SOCKS
+const HttpsProxyAgent = require('https-proxy-agent'); // Untuk proxy HTTP
 
 // Membuat interface untuk readline
 const rl = readline.createInterface({
@@ -11,17 +13,40 @@ const rl = readline.createInterface({
 
 // Pengaturan dasar
 const settings = {
-  BASE_URL: 'https://api1-pp.klokapp.ai/v1', // URL API yang benar
-  SESSION_TOKEN: '', // Session token untuk autentikasi
-  USE_PROXY: false, // Gunakan proxy atau tidak
-  PROXY_LIST: [], // Daftar proxy dari file
-  DELAY_BETWEEN_REQUESTS: [5000, 9000], // Penundaan antar permintaan (dalam milidetik)
-  QUESTIONS_FILE: 'questions.txt', // File tempat pertanyaan disimpan
-  CHAT_LIMIT: 50, // Batas chat per hari
-  STATE_FILE: 'bot_state.json', // File untuk menyimpan status bot
-  CHAT_ID: '', // Chat ID akan diminta dari pengguna
-  MODEL: 'llama-3.3-70b-instruct' // Model yang digunakan
+  BASE_URL: '', // Akan diisi dari config.json
+  SESSION_TOKEN: '', // Akan diisi dari config.json
+  USE_PROXY: false,
+  PROXY_LIST: [],
+  DELAY_BETWEEN_REQUESTS: [5000, 9000],
+  QUESTIONS_FILE: 'questions.txt',
+  CHAT_LIMIT: 50,
+  STATE_FILE: 'bot_state.json',
+  CHAT_ID: '', // Akan diisi dari config.json
+  MODEL: 'llama-3.3-70b-instruct',
+  CONFIG_FILE: 'config.json' // File konfigurasi
 };
+
+// Memuat konfigurasi dari config.json
+function loadConfig() {
+  if (fs.existsSync(settings.CONFIG_FILE)) {
+    const config = JSON.parse(fs.readFileSync(settings.CONFIG_FILE, 'utf8'));
+    settings.BASE_URL = config.BASE_URL;
+    settings.SESSION_TOKEN = config.SESSION_TOKEN;
+    settings.CHAT_ID = config.CHAT_ID;
+  } else {
+    console.log(`File ${settings.CONFIG_FILE} tidak ditemukan. Membuat file default...`);
+    const defaultConfig = {
+      BASE_URL: 'https://api1-pp.klokapp.ai/v1',
+      SESSION_TOKEN: '2EdsbAklmODdxzg01KGTzkM9NNGwa0UCttTk6CFaASY',
+      CHAT_ID: 'd7b12a7e-aacd-4c8e-9901-7474ff4edefe'
+    };
+    fs.writeFileSync(settings.CONFIG_FILE, JSON.stringify(defaultConfig, null, 2));
+    console.log(`File ${settings.CONFIG_FILE} telah dibuat. Silakan periksa dan sesuaikan jika perlu.`);
+    settings.BASE_URL = defaultConfig.BASE_URL;
+    settings.SESSION_TOKEN = defaultConfig.SESSION_TOKEN;
+    settings.CHAT_ID = defaultConfig.CHAT_ID;
+  }
+}
 
 // Memuat pertanyaan dari file
 function loadQuestions() {
@@ -65,30 +90,67 @@ function getRandomQuestion() {
   return QUESTIONS[Math.floor(Math.random() * QUESTIONS.length)];
 }
 
-// Fungsi untuk mendapatkan proxy acak dari daftar
-function getRandomProxy() {
-  if (!settings.USE_PROXY || settings.PROXY_LIST.length === 0) return null;
-  const proxy = settings.PROXY_LIST[Math.floor(Math.random() * settings.PROXY_LIST.length)];
-  const match = proxy.match(/http:\/\/([^:]+):([^@]+)@([^:]+):(\d+)/);
+// Fungsi untuk parsing proxy dan membuat agent
+function getProxyAgent(proxy) {
+  const match = proxy.match(/^(socks[45]h?|http):\/\/(?:([^:]+):([^@]+)@)?([^:]+):(\d+)/);
   if (!match) {
     console.error(`Format proxy salah: ${proxy}`);
     return null;
   }
-  const [, username, password, host, port] = match;
-  return {
-    host: host,
-    port: parseInt(port),
-    auth: {
-      username: username,
-      password: password
+
+  const [_, protocol, username, password, host, port] = match;
+  console.log(`Menggunakan proxy: ${protocol}://${host}:${port}${username ? ` dengan username ${username}` : ''}`);
+
+  if (protocol.startsWith('socks')) {
+    console.log(`Membuat SOCKS proxy agent dengan string: ${proxy}`);
+    try {
+      return new SocksProxyAgent(proxy, { timeout: 10000 });
+    } catch (error) {
+      console.error('Gagal membuat SOCKS proxy agent:', error.message);
+      return null;
     }
-  };
+  } else if (protocol === 'http') {
+    try {
+      return new HttpsProxyAgent(proxy);
+    } catch (error) {
+      console.error('Gagal membuat HTTP proxy agent:', error.message);
+      return null;
+    }
+  } else {
+    console.error(`Protokol proxy tidak didukung: ${protocol}`);
+    return null;
+  }
+}
+
+// Fungsi untuk mendapatkan proxy acak dari daftar
+function getRandomProxy() {
+  if (!settings.USE_PROXY || settings.PROXY_LIST.length === 0) return null;
+  const proxy = settings.PROXY_LIST[Math.floor(Math.random() * settings.PROXY_LIST.length)];
+  return getProxyAgent(proxy);
+}
+
+// Fungsi untuk menguji proxy
+async function testProxy(proxyAgent) {
+  if (!proxyAgent) return false;
+  try {
+    const config = {
+      httpsAgent: proxyAgent,
+      timeout: 10000
+    };
+    const response = await axios.get('https://api.ipify.org?format=json', config);
+    console.log(`Proxy berhasil! IP yang terdeteksi: ${response.data.ip}`);
+    return true;
+  } catch (error) {
+    console.error(`Gagal menguji proxy:`, error.message);
+    if (error.code) console.error(`Kode kesalahan: ${error.code}`);
+    return false;
+  }
 }
 
 // Fungsi untuk mengirim pesan
 async function sendMessage() {
   const message = getRandomQuestion();
-  const proxyConfig = getRandomProxy();
+  const proxyAgent = getRandomProxy();
   try {
     const config = {
       headers: {
@@ -96,18 +158,20 @@ async function sendMessage() {
         'Content-Type': 'application/json',
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
         'Accept': 'application/json',
+        'Accept-Language': 'en-US,en;q=0.9',
         'Origin': 'https://klokapp.ai',
-        'Referer': 'https://klokapp.ai/app'
+        'Referer': 'https://klokapp.ai/app',
+        'Connection': 'keep-alive',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-site'
       },
-      httpsAgent: new https.Agent({
+      httpsAgent: proxyAgent || new https.Agent({
         rejectUnauthorized: false,
         keepAlive: true
       }),
       timeout: 30000
     };
-    if (proxyConfig) {
-      config.proxy = proxyConfig;
-    }
     const payload = {
       messages: [
         {
@@ -159,6 +223,19 @@ async function runBot() {
   console.log('Memulai bot...');
   console.log(`Loaded ${QUESTIONS.length} questions from ${settings.QUESTIONS_FILE}`);
 
+  // Uji proxy sebelum memulai
+  if (settings.USE_PROXY) {
+    const proxyAgent = getRandomProxy();
+    if (proxyAgent) {
+      console.log('Menguji proxy sebelum memulai...');
+      const proxyWorks = await testProxy(proxyAgent);
+      if (!proxyWorks) {
+        console.error('Proxy tidak berfungsi. Bot akan berhenti. Silakan ganti proxy dan coba lagi.');
+        process.exit(1);
+      }
+    }
+  }
+
   let state = loadState();
 
   while (true) {
@@ -184,10 +261,9 @@ async function runBot() {
 
 // Fungsi untuk mengatur konfigurasi
 async function configureSettings() {
-  settings.BASE_URL = await new Promise(resolve => rl.question('Masukkan URL API: ', resolve));
-  settings.SESSION_TOKEN = await new Promise(resolve => rl.question('Masukkan Session Token: ', resolve));
-  settings.CHAT_ID = await new Promise(resolve => rl.question('Masukkan Chat ID: ', resolve));
-  
+  // Muat konfigurasi dari config.json
+  loadConfig();
+
   const useProxy = await new Promise(resolve => rl.question('Gunakan proxy? (y/n): ', resolve));
   settings.USE_PROXY = useProxy.toLowerCase() === 'y';
   
