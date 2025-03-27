@@ -11,19 +11,29 @@ const rl = readline.createInterface({
   output: process.stdout
 });
 
+// Daftar User-Agent untuk rotasi
+const USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15'
+];
+
 // Pengaturan dasar
 const settings = {
   BASE_URL: '', // Akan diisi dari config.json
   SESSION_TOKEN: '', // Akan diisi dari config.json
   USE_PROXY: false,
   PROXY_LIST: [],
-  DELAY_BETWEEN_REQUESTS: [5000, 9000],
+  DELAY_BETWEEN_REQUESTS: [50000, 90000], // Delay 50-70 detik antar permintaan
+  LONG_PAUSE: [180000, 420000], // Jeda panjang 3-7 menit setiap 3 pesan
   QUESTIONS_FILE: 'questions.txt',
-  CHAT_LIMIT: 50,
+  CHAT_LIMIT: 50, // Limit 50 Pesan per hari
   STATE_FILE: 'bot_state.json',
   CHAT_ID: '', // Akan diisi dari config.json
   MODEL: 'llama-3.3-70b-instruct',
-  CONFIG_FILE: 'config.json' // File konfigurasi
+  CONFIG_FILE: 'config.json', // File konfigurasi
+  RATE_LIMIT_WAIT: 25 * 60 * 60 * 1000 // 25 jam dalam milidetik
 };
 
 // Memuat konfigurasi dari config.json
@@ -67,7 +77,7 @@ function loadState() {
   if (fs.existsSync(settings.STATE_FILE)) {
     return JSON.parse(fs.readFileSync(settings.STATE_FILE, 'utf8'));
   }
-  return { chatCount: 0, lastReset: Date.now() };
+  return { chatCount: 0, lastReset: Date.now(), messagesSinceLastPause: 0 };
 }
 
 // Menyimpan status bot ke file
@@ -83,6 +93,11 @@ function sleep(ms) {
 // Fungsi untuk mendapatkan angka acak dalam rentang tertentu
 function getRandomNumber(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+// Fungsi untuk mendapatkan User-Agent acak
+function getRandomUserAgent() {
+  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 }
 
 // Fungsi untuk mendapatkan pertanyaan acak
@@ -156,7 +171,7 @@ async function sendMessage() {
       headers: {
         'x-session-token': settings.SESSION_TOKEN,
         'Content-Type': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'User-Agent': getRandomUserAgent(), // Rotasi User-Agent
         'Accept': 'application/json',
         'Accept-Language': 'en-US,en;q=0.9',
         'Origin': 'https://klokapp.ai',
@@ -164,7 +179,9 @@ async function sendMessage() {
         'Connection': 'keep-alive',
         'Sec-Fetch-Dest': 'empty',
         'Sec-Fetch-Mode': 'cors',
-        'Sec-Fetch-Site': 'same-site'
+        'Sec-Fetch-Site': 'same-site',
+        'Cache-Control': 'no-cache', // Tambahan header untuk anti-deteksi
+        'Pragma': 'no-cache'
       },
       httpsAgent: proxyAgent || new https.Agent({
         rejectUnauthorized: false,
@@ -192,9 +209,17 @@ async function sendMessage() {
   } catch (error) {
     console.error(`Gagal mengirim pesan:`, error.response ? error.response.data : error.message);
     if (error.response && error.response.data.detail) {
-      error.response.data.detail.forEach(detail => {
-        console.error(`Field yang hilang:`, detail.loc);
-      });
+      if (Array.isArray(error.response.data.detail)) {
+        error.response.data.detail.forEach(detail => {
+          console.error(`Field yang hilang:`, detail.loc);
+        });
+      } else {
+        console.error(`Detail kesalahan:`, error.response.data.detail);
+        if (error.response.data.detail.includes('rate_limit_exceeded')) {
+          console.error(`Rate limit terlampaui. Menunggu 25 jam sebelum mencoba lagi...`);
+          await sleep(settings.RATE_LIMIT_WAIT); // Tunggu 25 jam
+        }
+      }
     }
     if (error.code) console.error(`Kode kesalahan: ${error.code}`);
     return false;
@@ -215,6 +240,7 @@ async function waitForNextCycle(state) {
 
   state.chatCount = 0;
   state.lastReset = Date.now();
+  state.messagesSinceLastPause = 0; // Reset jeda panjang
   saveState(state);
 }
 
@@ -234,6 +260,8 @@ async function runBot() {
         process.exit(1);
       }
     }
+  } else {
+    console.warn('Kamu tidak menggunakan proxy. IP asli kamu akan terlihat oleh server. Risiko deteksi lebih tinggi.');
   }
 
   let state = loadState();
@@ -248,7 +276,17 @@ async function runBot() {
       const success = await sendMessage();
       if (success) {
         state.chatCount++;
+        state.messagesSinceLastPause = (state.messagesSinceLastPause || 0) + 1;
         saveState(state);
+
+        // Tambahkan jeda panjang setiap 3 pesan
+        if (state.messagesSinceLastPause >= 3) {
+          const longPause = getRandomNumber(settings.LONG_PAUSE[0], settings.LONG_PAUSE[1]);
+          console.log(`Jeda panjang: menunggu ${Math.round(longPause / (1000 * 60 * 60))} jam untuk menyerupai perilaku manusia...`);
+          await sleep(longPause);
+          state.messagesSinceLastPause = 0;
+          saveState(state);
+        }
       }
       const delay = getRandomNumber(settings.DELAY_BETWEEN_REQUESTS[0], settings.DELAY_BETWEEN_REQUESTS[1]);
       console.log(`Menunggu ${delay / 1000} detik sebelum pesan berikutnya...`);
